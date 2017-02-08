@@ -1,0 +1,8 @@
+ALB    albacore tuna
+BET    bigeye tuna
+DOL    dolphinfish, mahi mahi
+LAG    opah, moonfish
+NoF    no fish
+OTHER    misc
+SHARK    silky, shortfin mako
+YFT    yellowfin tuna

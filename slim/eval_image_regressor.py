@@ -20,12 +20,14 @@ from __future__ import print_function
 
 import math
 import tensorflow as tf
-import csv
+import json
 import numpy as np
+import csv
 
 from datasets import dataset_factory
 from nets import nets_factory
 from preprocessing import preprocessing_factory
+
 
 slim = tf.contrib.slim
 
@@ -72,12 +74,6 @@ tf.app.flags.DEFINE_integer(
     'num_test_samples', 200,
     'Number of test samples')
 
-tf.app.flags.DEFINE_integer(
-    'labels_offset', 0,
-    'An offset for the labels in the dataset. This flag is primarily used to '
-    'evaluate the VGG and ResNet architectures which do not use a background '
-    'class for the ImageNet dataset.')
-
 tf.app.flags.DEFINE_string(
     'model_name', 'inception_v4', 'The name of the architecture to evaluate.')
 
@@ -94,7 +90,7 @@ tf.app.flags.DEFINE_integer(
     'eval_image_size', None, 'Eval image size')
 
 tf.app.flags.DEFINE_string(
-    'test_output_fname', None, 'Output csv file with the logits')
+    'bbox_output_fname', None, 'Bbox output filename(csv file containing filenames and corresponding bboxes)')
 
 
 FLAGS = tf.app.flags.FLAGS
@@ -122,7 +118,7 @@ def main(_):
     ####################
     network_fn = nets_factory.get_network_fn(
         FLAGS.model_name,
-        num_classes=(dataset.num_classes - FLAGS.labels_offset),
+        num_classes=dataset.num_classes,
         is_training=False)
 
     ##############################################################
@@ -133,9 +129,7 @@ def main(_):
         shuffle=False,
         common_queue_capacity=3 * FLAGS.batch_size,
         common_queue_min=FLAGS.batch_size)
-    [image, label, filename, bbox] = provider.get(['image', 'label', 'filename', 'bbox'])
-    bbx=tf.reshape(bbox, [1,1,4])      
-    label -= FLAGS.labels_offset
+    [image, bbox, filename] = provider.get(['image', 'bbox', 'filename'])
 
     #####################################
     # Select the preprocessing function #
@@ -147,10 +141,10 @@ def main(_):
 
     eval_image_size = FLAGS.eval_image_size or network_fn.default_image_size
 
-    image = image_preprocessing_fn(image, eval_image_size, eval_image_size, bbox=bbx)
+    image = image_preprocessing_fn(image, eval_image_size, eval_image_size)
 
-    images, labels, filenames = tf.train.batch(
-        [image, label, filename],
+    images, bboxes, filenames = tf.train.batch(
+        [image, bbox, filename],
         batch_size=FLAGS.batch_size,
         num_threads=FLAGS.num_preprocessing_threads,
         capacity=2 * FLAGS.batch_size)
@@ -158,7 +152,7 @@ def main(_):
     ####################
     # Define the model #
     ####################
-    logits, _ = network_fn(images)
+    predictions, _ = network_fn(images)
 
     if FLAGS.moving_average_decay:
       variable_averages = tf.train.ExponentialMovingAverage(
@@ -169,13 +163,9 @@ def main(_):
     else:
       variables_to_restore = slim.get_variables_to_restore()
 
-    predictions = tf.argmax(logits, 1)
-    labels = tf.squeeze(labels)
-
     # Define the metrics:
     names_to_values, names_to_updates = slim.metrics.aggregate_metric_map({
-        'Accuracy': slim.metrics.streaming_accuracy(predictions, labels)
-        #,'Recall@5': slim.metrics.streaming_recall_at_k(logits, labels, 5),
+        'Accuracy': slim.metrics.streaming_mean_squared_error(predictions, bboxes)
     })
 
     # Print the summaries to screen.
@@ -197,37 +187,43 @@ def main(_):
     else:
       checkpoint_path = FLAGS.checkpoint_path
 
+    tf.logging.info('Num samples %s' % dataset.num_samples)
+    tf.logging.info('Num batches %s' % num_batches)
+    tf.logging.info('Batch size %s' % FLAGS.batch_size)
     tf.logging.info('Evaluating %s' % checkpoint_path)
 
     # no evaluation if testing
-    if FLAGS.test_output_fname is not None:
+    if FLAGS.bbox_output_fname is not None:
       num_evals = 0
       eval_op = []
-      final_op=[logits, filenames]
+      final_op=[predictions, bboxes, filenames]
     else:
       num_evals=num_batches
       eval_op=names_to_updates.values()
       final_op=[]      
     
-    preds_fnames = slim.evaluation.evaluate_once(
+    preds, bbxs, fnames = slim.evaluation.evaluate_once(
         master=FLAGS.master,
         checkpoint_path=checkpoint_path,
         logdir=FLAGS.eval_dir,
         num_evals=num_evals,
         eval_op=eval_op,
-        final_op=final_op,      
+        final_op=final_op,
         variables_to_restore=variables_to_restore)
-    
-    if FLAGS.test_output_fname is not None:
-      preds = preds_fnames[0]
-      fnames= preds_fnames[1]
-      with open(FLAGS.test_output_fname, 'w') as f:
+
+    if FLAGS.bbox_output_fname is not None:
+      d = {}
+      with open(FLAGS.bbox_output_fname, 'w') as f:
         writer = csv.writer(f)      
         for i in range(len(preds)):
+          #b = np.asarray(bbxs[i])
           p = np.asarray(preds[i])
           fname = str(fnames[i])
+          #d[fname] = [p.tolist(), b.tolist()]
           writer.writerow([fname]+p.tolist())          
+      #json.dump(d, open("regression_output.json", "w"))
+      #print(np.mean((preds-bbxs)**2))
 
-    
+
 if __name__ == '__main__':
   tf.app.run()

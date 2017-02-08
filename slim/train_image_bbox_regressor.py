@@ -139,9 +139,6 @@ tf.app.flags.DEFINE_float(
     'The minimal end learning rate used by a polynomial decay learning rate.')
 
 tf.app.flags.DEFINE_float(
-    'label_smoothing', 0.0, 'The amount of label smoothing.')
-
-tf.app.flags.DEFINE_float(
     'learning_rate_decay_factor', 0.94, 'Learning rate decay factor.')
 
 tf.app.flags.DEFINE_float(
@@ -185,12 +182,6 @@ tf.app.flags.DEFINE_integer(
 tf.app.flags.DEFINE_integer(
     'num_test_samples', 200,
     'Number of test samples')
-
-tf.app.flags.DEFINE_integer(
-    'labels_offset', 0,
-    'An offset for the labels in the dataset. This flag is primarily used to '
-    'evaluate the VGG and ResNet architectures which do not use a background '
-    'class for the ImageNet dataset.')
 
 tf.app.flags.DEFINE_string(
     'model_name', 'inception_v3', 'The name of the architecture to train.')
@@ -434,7 +425,7 @@ def main(_):
     ####################
     network_fn = nets_factory.get_network_fn(
         FLAGS.model_name,
-        num_classes=(dataset.num_classes - FLAGS.labels_offset),
+        num_classes=dataset.num_classes,
         weight_decay=FLAGS.weight_decay,
         is_training=True)
 
@@ -455,42 +446,38 @@ def main(_):
           num_readers=FLAGS.num_readers,
           common_queue_capacity=20 * FLAGS.batch_size,
           common_queue_min=10 * FLAGS.batch_size)
-      [image, label, bbox] = provider.get(['image', 'label', 'bbox'])
-      label -= FLAGS.labels_offset
-      bbx=tf.reshape(bbox, [1,1,4])
+      [image, bbox] = provider.get(['image', 'bbox'])
+      bbx=tf.reshape(bbox, [1,1,4])      
 
       train_image_size = FLAGS.train_image_size or network_fn.default_image_size
 
       image = image_preprocessing_fn(image, train_image_size, train_image_size,
                                      bbox=bbx)
 
-      images, labels = tf.train.batch(
-          [image, label],
+      images, bboxes = tf.train.batch(
+          [image, bbox],
           batch_size=FLAGS.batch_size,
           num_threads=FLAGS.num_preprocessing_threads,
           capacity=5 * FLAGS.batch_size)
-      labels = slim.one_hot_encoding(
-          labels, dataset.num_classes - FLAGS.labels_offset)
       batch_queue = slim.prefetch_queue.prefetch_queue(
-          [images, labels], capacity=2 * deploy_config.num_clones)
+          [images, bboxes], capacity=2 * deploy_config.num_clones)
 
     ####################
     # Define the model #
     ####################
     def clone_fn(batch_queue):
       """Allows data parallelism by creating multiple clones of network_fn."""
-      images, labels = batch_queue.dequeue()
+      images, bboxes = batch_queue.dequeue()
       logits, end_points = network_fn(images)
 
       #############################
       # Specify the loss function #
       #############################
-      if 'AuxLogits' in end_points:
-        slim.losses.softmax_cross_entropy(
-            end_points['AuxLogits'], labels,
-            label_smoothing=FLAGS.label_smoothing, weight=0.4, scope='aux_loss')
-      slim.losses.softmax_cross_entropy(
-          logits, labels, label_smoothing=FLAGS.label_smoothing, weight=1.0)
+      #if 'AuxLogits' in end_points:
+      #  slim.losses.softmax_cross_entropy(
+      #      end_points['AuxLogits'], labels,
+      #      label_smoothing=FLAGS.label_smoothing, weight=0.4, scope='aux_loss')
+      slim.losses.mean_squared_error(predictions=logits, targets=bboxes)
       return end_points
 
     # Gather initial summaries.
@@ -558,6 +545,7 @@ def main(_):
     total_loss, clones_gradients = model_deploy.optimize_clones(
         clones,
         optimizer,
+        regularization_losses=[],
         var_list=variables_to_train)
     # Add total_loss to summary.
     summaries.add(tf.scalar_summary('total_loss', total_loss,

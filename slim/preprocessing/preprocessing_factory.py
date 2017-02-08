@@ -51,6 +51,7 @@ def get_preprocessing(name, is_training=False):
       'inception_v2': inception_preprocessing,
       'inception_v3': inception_preprocessing,
       'inception_v4': inception_preprocessing,
+      'inception_v4_regression': inception_preprocessing,    
       'inception_resnet_v2': inception_preprocessing,
       'lenet': lenet_preprocessing,
       'resnet_v1_50': vgg_preprocessing,
